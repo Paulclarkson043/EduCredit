@@ -168,3 +168,220 @@
     (map-get? credit-transfers transfer-id)
 )
 
+
+(define-map registered-students
+    {student-id: (string-ascii 20)}
+    {
+        name: (string-ascii 50),
+        institution: principal,
+        enrollment-date: uint,
+        active: bool
+    }
+)
+
+(define-public (register-student 
+    (student-id (string-ascii 20))
+    (name (string-ascii 50)))
+    (begin
+        (asserts! (is-registered tx-sender) err-not-registered)
+        (map-set registered-students {student-id: student-id}
+            {
+                name: name,
+                institution: tx-sender,
+                enrollment-date: stacks-block-height,
+                active: true
+            }
+        )
+        (ok true)
+    )
+)
+
+
+(define-map course-ratings
+    {institution: principal, course-id: (string-ascii 20)}
+    {
+        total-rating: uint,
+        number-of-ratings: uint,
+        average-rating: uint
+    }
+)
+
+(define-public (rate-course 
+    (institution principal)
+    (course-id (string-ascii 20))
+    (rating uint))
+    (let
+        ((current-ratings (default-to 
+            {total-rating: u0, number-of-ratings: u0, average-rating: u0}
+            (map-get? course-ratings {institution: institution, course-id: course-id}))))
+        (asserts! (and (>= rating u1) (<= rating u5)) err-invalid-credits)
+        (map-set course-ratings {institution: institution, course-id: course-id}
+            {
+                total-rating: (+ (get total-rating current-ratings) rating),
+                number-of-ratings: (+ (get number-of-ratings current-ratings) u1),
+                average-rating: (/ (+ (get total-rating current-ratings) rating) 
+                                 (+ (get number-of-ratings current-ratings) u1))
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-map transfer-history
+    principal
+    {
+        transfers-sent: (list 50 uint),
+        transfers-received: (list 50 uint)
+    }
+)
+
+(define-public (add-transfer-to-history (transfer-id uint))
+    (let
+        ((transfer (unwrap! (map-get? credit-transfers transfer-id) err-course-not-found))
+         (from-history (default-to {transfers-sent: (list), transfers-received: (list)} 
+            (map-get? transfer-history (get from-institution transfer))))
+         (to-history (default-to {transfers-sent: (list), transfers-received: (list)} 
+            (map-get? transfer-history (get to-institution transfer)))))
+        (map-set transfer-history (get from-institution transfer)
+            (merge from-history {transfers-sent: (unwrap-panic (as-max-len? 
+                (append (get transfers-sent from-history) transfer-id) u50))}))
+        (map-set transfer-history (get to-institution transfer)
+            (merge to-history {transfers-received: (unwrap-panic (as-max-len? 
+                (append (get transfers-received to-history) transfer-id) u50))}))
+        (ok true)
+    )
+)
+
+
+(define-map course-prerequisites
+    {institution: principal, course-id: (string-ascii 20)}
+    {prerequisites: (list 10 (string-ascii 20))}
+)
+
+(define-public (set-course-prerequisites 
+    (course-id (string-ascii 20))
+    (prereq-list (list 10 (string-ascii 20))))
+    (begin
+        (asserts! (is-registered tx-sender) err-not-registered)
+        (asserts! (is-some (map-get? courses {institution: tx-sender, course-id: course-id})) err-course-not-found)
+        (map-set course-prerequisites {institution: tx-sender, course-id: course-id}
+            {prerequisites: prereq-list}
+        )
+        (ok true)
+    )
+)
+
+(define-map academic-calendar
+    principal
+    {
+        semester-start: uint,
+        semester-end: uint,
+        registration-deadline: uint,
+        transfer-deadline: uint
+    }
+)
+
+(define-public (set-academic-calendar 
+    (start uint)
+    (end uint)
+    (reg-deadline uint)
+    (transfer-deadline uint))
+    (begin
+        (asserts! (is-registered tx-sender) err-not-registered)
+        (map-set academic-calendar tx-sender
+            {
+                semester-start: start,
+                semester-end: end,
+                registration-deadline: reg-deadline,
+                transfer-deadline: transfer-deadline
+            }
+        )
+        (ok true)
+    )
+)
+
+
+(define-map course-capacity
+    {institution: principal, course-id: (string-ascii 20)}
+    {
+        max-students: uint,
+        enrolled-students: uint,
+        waitlist: (list 50 (string-ascii 20))
+    }
+)
+
+(define-public (set-course-capacity 
+    (course-id (string-ascii 20))
+    (max-capacity uint))
+    (begin
+        (asserts! (is-registered tx-sender) err-not-registered)
+        (map-set course-capacity {institution: tx-sender, course-id: course-id}
+            {
+                max-students: max-capacity,
+                enrolled-students: u0,
+                waitlist: (list)
+            }
+        )
+        (ok true)
+    )
+)
+
+
+
+(define-map course-certificates
+    {institution: principal, student-id: (string-ascii 20), course-id: (string-ascii 20)}
+    {
+        completion-date: uint,
+        grade: (string-ascii 2),
+        certificate-hash: (string-ascii 64)
+    }
+)
+
+(define-public (issue-certificate 
+    (student-id (string-ascii 20))
+    (course-id (string-ascii 20))
+    (grade (string-ascii 2))
+    (cert-hash (string-ascii 64)))
+    (begin
+        (asserts! (is-registered tx-sender) err-not-registered)
+        (map-set course-certificates 
+            {institution: tx-sender, student-id: student-id, course-id: course-id}
+            {
+                completion-date: stacks-block-height,
+                grade: grade,
+                certificate-hash: cert-hash
+            }
+        )
+        (ok true)
+    )
+)
+
+
+(define-map transfer-comments
+    uint
+    {
+        comment: (string-ascii 200),
+        timestamp: uint,
+        author: principal
+    }
+)
+
+(define-public (add-transfer-comment 
+    (transfer-id uint)
+    (comment (string-ascii 200)))
+    (let
+        ((transfer (unwrap! (map-get? credit-transfers transfer-id) err-transfer-not-found)))
+        (asserts! (or 
+            (is-eq tx-sender (get from-institution transfer))
+            (is-eq tx-sender (get to-institution transfer))) 
+            err-unauthorized)
+        (map-set transfer-comments transfer-id
+            {
+                comment: comment,
+                timestamp: stacks-block-height,
+                author: tx-sender
+            }
+        )
+        (ok true)
+    )
+)
