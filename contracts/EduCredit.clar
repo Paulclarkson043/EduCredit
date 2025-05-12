@@ -385,3 +385,120 @@
         (ok true)
     )
 )
+
+
+
+(define-map achievement-badges
+    {badge-id: (string-ascii 20)}
+    {
+        institution: principal,
+        name: (string-ascii 50),
+        description: (string-ascii 200),
+        criteria: (string-ascii 100)
+    }
+)
+
+(define-map student-badges
+    {student-id: (string-ascii 20), badge-id: (string-ascii 20)}
+    {
+        issue-date: uint,
+        issuer: principal,
+        metadata-uri: (string-ascii 100)
+    }
+)
+
+(define-public (create-badge 
+    (badge-id (string-ascii 20))
+    (name (string-ascii 50))
+    (description (string-ascii 200))
+    (criteria (string-ascii 100)))
+    (begin
+        (asserts! (is-registered tx-sender) err-not-registered)
+        (map-set achievement-badges {badge-id: badge-id}
+            {
+                institution: tx-sender,
+                name: name,
+                description: description,
+                criteria: criteria
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-public (award-badge
+    (student-id (string-ascii 20))
+    (badge-id (string-ascii 20))
+    (metadata-uri (string-ascii 100)))
+    (begin
+        (asserts! (is-registered tx-sender) err-not-registered)
+        (map-set student-badges 
+            {student-id: student-id, badge-id: badge-id}
+            {
+                issue-date: stacks-block-height,
+                issuer: tx-sender,
+                metadata-uri: metadata-uri
+            }
+        )
+        (ok true)
+    )
+)
+
+
+(define-map transfer-rules
+    principal
+    {
+        min-credits: uint,
+        max-credits: uint,
+        expiration-blocks: uint,
+        required-grade: (string-ascii 2),
+        institution-whitelist: (list 50 principal)
+    }
+)
+
+(define-public (set-transfer-rules
+    (min-credits uint)
+    (max-credits uint)
+    (expiration-blocks uint)
+    (required-grade (string-ascii 2))
+    (whitelist (list 50 principal)))
+    (begin
+        (asserts! (is-registered tx-sender) err-not-registered)
+        (map-set transfer-rules tx-sender
+            {
+                min-credits: min-credits,
+                max-credits: max-credits,
+                expiration-blocks: expiration-blocks,
+                required-grade: required-grade,
+                institution-whitelist: whitelist
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (validate-transfer
+    (from-institution principal)
+    (credits uint)
+    (completion-block uint)
+    (grade (string-ascii 2)))
+    (let
+        ((rules (unwrap! (map-get? transfer-rules tx-sender) err-not-registered)))
+        (ok (and
+            (>= credits (get min-credits rules))
+            (<= credits (get max-credits rules))
+            (<= (- stacks-block-height completion-block) (get expiration-blocks rules))
+            (is-eq grade (get required-grade rules))
+            (is-some (index-of (get institution-whitelist rules) from-institution))
+        ))
+    )
+)
+
+
+(define-public (set-subscription-fee (fee uint))
+    (begin
+        (asserts! (is-owner) err-owner-only)
+        (var-set subscription-fee fee)
+        (ok true)
+    )
+)
