@@ -502,3 +502,180 @@
         (ok true)
     )
 )
+
+
+(define-constant err-equivalency-exists (err u109))
+(define-constant err-equivalency-not-found (err u110))
+(define-constant err-invalid-equivalency (err u111))
+
+(define-map course-equivalencies
+    {
+        from-institution: principal,
+        from-course-id: (string-ascii 20),
+        to-institution: principal,
+        to-course-id: (string-ascii 20)
+    }
+    {
+        credit-ratio: uint,
+        approved-by-from: bool,
+        approved-by-to: bool,
+        creation-date: uint,
+        expiry-date: uint
+    }
+)
+
+(define-map equivalency-proposals
+    uint
+    {
+        from-institution: principal,
+        from-course-id: (string-ascii 20),
+        to-institution: principal,
+        to-course-id: (string-ascii 20),
+        credit-ratio: uint,
+        proposer: principal,
+        status: (string-ascii 10),
+        creation-date: uint
+    }
+)
+
+(define-data-var equivalency-nonce uint u0)
+
+(define-public (propose-course-equivalency
+    (from-institution principal)
+    (from-course-id (string-ascii 20))
+    (to-institution principal)
+    (to-course-id (string-ascii 20))
+    (credit-ratio uint))
+    (let
+        ((proposal-id (var-get equivalency-nonce)))
+        (asserts! (is-registered tx-sender) err-not-registered)
+        (asserts! (or (is-eq tx-sender from-institution) (is-eq tx-sender to-institution)) err-unauthorized)
+        (asserts! (> credit-ratio u0) err-invalid-equivalency)
+        (asserts! (is-some (map-get? courses {institution: from-institution, course-id: from-course-id})) err-course-not-found)
+        (asserts! (is-some (map-get? courses {institution: to-institution, course-id: to-course-id})) err-course-not-found)
+        
+        (map-set equivalency-proposals proposal-id
+            {
+                from-institution: from-institution,
+                from-course-id: from-course-id,
+                to-institution: to-institution,
+                to-course-id: to-course-id,
+                credit-ratio: credit-ratio,
+                proposer: tx-sender,
+                status: "pending",
+                creation-date: stacks-block-height
+            }
+        )
+        (var-set equivalency-nonce (+ proposal-id u1))
+        (ok proposal-id)
+    )
+)
+
+(define-public (approve-equivalency-proposal (proposal-id uint))
+    (let
+        ((proposal (unwrap! (map-get? equivalency-proposals proposal-id) err-equivalency-not-found)))
+        (asserts! (or 
+            (is-eq tx-sender (get from-institution proposal))
+            (is-eq tx-sender (get to-institution proposal))) err-unauthorized)
+        (asserts! (is-eq (get status proposal) "pending") err-invalid-equivalency)
+        
+        (map-set equivalency-proposals proposal-id
+            (merge proposal {status: "approved"})
+        )
+        
+        (map-set course-equivalencies
+            {
+                from-institution: (get from-institution proposal),
+                from-course-id: (get from-course-id proposal),
+                to-institution: (get to-institution proposal),
+                to-course-id: (get to-course-id proposal)
+            }
+            {
+                credit-ratio: (get credit-ratio proposal),
+                approved-by-from: (is-eq tx-sender (get from-institution proposal)),
+                approved-by-to: (is-eq tx-sender (get to-institution proposal)),
+                creation-date: stacks-block-height,
+                expiry-date: (+ stacks-block-height u52560)
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-public (initiate-auto-credit-transfer
+    (to-institution principal)
+    (student-id (string-ascii 20))
+    (course-id (string-ascii 20))
+    (target-course-id (string-ascii 20)))
+    (let
+        ((course (unwrap! (map-get? courses {institution: tx-sender, course-id: course-id}) err-course-not-found))
+         (equivalency (unwrap! (map-get? course-equivalencies 
+            {
+                from-institution: tx-sender,
+                from-course-id: course-id,
+                to-institution: to-institution,
+                to-course-id: target-course-id
+            }) err-equivalency-not-found))
+         (nonce (var-get transfer-nonce))
+         (adjusted-credits (/ (* (get credits course) (get credit-ratio equivalency)) u100)))
+        
+        (asserts! (is-registered tx-sender) err-not-registered)
+        (asserts! (is-registered to-institution) err-not-registered)
+        (asserts! (get verified course) err-unauthorized)
+        (asserts! (and (get approved-by-from equivalency) (get approved-by-to equivalency)) err-unauthorized)
+        (asserts! (< stacks-block-height (get expiry-date equivalency)) err-invalid-equivalency)
+        
+        ;; (map-set credit-transfers nonce
+        ;;     {
+        ;;         from-institution: tx-sender,
+        ;;         to-institution: to-institution,
+        ;;         student-id: student-id,
+        ;;         course-id: target-course-id,
+        ;;         credits: adjusted-credits,
+        ;;         status: "auto-approved",
+        ;;         timestamp: stacks-block-height
+        ;;     }
+        ;; )
+        (var-set transfer-nonce (+ nonce u1))
+        (ok nonce)
+    )
+)
+
+(define-read-only (get-course-equivalency
+    (from-institution principal)
+    (from-course-id (string-ascii 20))
+    (to-institution principal)
+    (to-course-id (string-ascii 20)))
+    (map-get? course-equivalencies
+        {
+            from-institution: from-institution,
+            from-course-id: from-course-id,
+            to-institution: to-institution,
+            to-course-id: to-course-id
+        }
+    )
+)
+
+(define-read-only (get-equivalency-proposal (proposal-id uint))
+    (map-get? equivalency-proposals proposal-id)
+)
+
+(define-read-only (check-auto-transfer-eligibility
+    (from-institution principal)
+    (from-course-id (string-ascii 20))
+    (to-institution principal)
+    (to-course-id (string-ascii 20)))
+    (match (map-get? course-equivalencies
+        {
+            from-institution: from-institution,
+            from-course-id: from-course-id,
+            to-institution: to-institution,
+            to-course-id: to-course-id
+        })
+        equivalency (ok (and 
+            (get approved-by-from equivalency)
+            (get approved-by-to equivalency)
+            (< stacks-block-height (get expiry-date equivalency))))
+        (ok false)
+    )
+)
