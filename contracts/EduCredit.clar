@@ -679,3 +679,248 @@
         (ok false)
     )
 )
+
+;; Institutional Reputation System Constants
+(define-constant err-invalid-reputation-score (err u112))
+(define-constant err-reputation-calculation-error (err u113))
+(define-constant err-insufficient-data (err u114))
+(define-constant min-reputation-score u0)
+(define-constant max-reputation-score u1000)
+(define-constant reputation-decay-rate u5)
+(define-constant min-transfers-for-score u3)
+
+;; Reputation Data Maps
+(define-map institutional-reputation
+    principal
+    {
+        overall-score: uint,
+        transfer-success-rate: uint,
+        course-quality-score: uint,
+        response-time-score: uint,
+        total-transfers: uint,
+        successful-transfers: uint,
+        last-updated: uint,
+        reputation-tier: (string-ascii 10)
+    }
+)
+
+(define-map reputation-metrics
+    principal
+    {
+        pending-transfers: uint,
+        rejected-transfers: uint,
+        average-response-time: uint,
+        total-course-ratings: uint,
+        total-rating-points: uint,
+        verification-requests: uint,
+        successful-verifications: uint
+    }
+)
+
+(define-map reputation-history
+    {institution: principal, timestamp: uint}
+    {
+        score: uint,
+        reason: (string-ascii 50),
+        change: int
+    }
+)
+
+(define-data-var reputation-history-nonce uint u0)
+
+;; Private Functions
+(define-private (calculate-transfer-success-rate (institution principal))
+    (let
+        ((reputation-data (default-to 
+            {
+                overall-score: u500,
+                transfer-success-rate: u0,
+                course-quality-score: u0,
+                response-time-score: u0,
+                total-transfers: u0,
+                successful-transfers: u0,
+                last-updated: u0,
+                reputation-tier: "unrated"
+            }
+            (map-get? institutional-reputation institution))))
+        (if (> (get total-transfers reputation-data) u0)
+            (/ (* (get successful-transfers reputation-data) u100) (get total-transfers reputation-data))
+            u0
+        )
+    )
+)
+
+(define-private (calculate-course-quality-score (institution principal))
+    (let
+        ((metrics (default-to
+            {
+                pending-transfers: u0,
+                rejected-transfers: u0,
+                average-response-time: u0,
+                total-course-ratings: u0,
+                total-rating-points: u0,
+                verification-requests: u0,
+                successful-verifications: u0
+            }
+            (map-get? reputation-metrics institution))))
+        (if (> (get total-course-ratings metrics) u0)
+            (/ (* (get total-rating-points metrics) u200) (get total-course-ratings metrics))
+            u0
+        )
+    )
+)
+
+(define-private (calculate-response-time-score (average-response-time uint))
+    (if (<= average-response-time u144)
+        u1000
+        (if (<= average-response-time u1008)
+            u750
+            (if (<= average-response-time u4032)
+                u500
+                u250
+            )
+        )
+    )
+)
+
+(define-private (determine-reputation-tier (score uint))
+    (if (>= score u900)
+        "platinum"
+        (if (>= score u750)
+            "gold"
+            (if (>= score u600)
+                "silver"
+                (if (>= score u400)
+                    "bronze"
+                    "basic"
+                )
+            )
+        )
+    )
+)
+
+(define-private (calculate-overall-score 
+    (transfer-rate uint)
+    (quality-score uint)
+    (response-score uint))
+    (let
+        ((weighted-transfer (* transfer-rate u4))
+         (weighted-quality (* quality-score u3))
+         (weighted-response (* response-score u3)))
+        (/ (+ weighted-transfer weighted-quality weighted-response) u10)
+    )
+)
+
+(define-private (record-reputation-change 
+    (institution principal)
+    (score uint)
+    (reason (string-ascii 50))
+    (change int))
+    (let
+        ((history-id (var-get reputation-history-nonce)))
+        (map-set reputation-history
+            {institution: institution, timestamp: stacks-block-height}
+            {
+                score: score,
+                reason: reason,
+                change: change
+            }
+        )
+        (var-set reputation-history-nonce (+ history-id u1))
+        true
+    )
+)
+
+;; Public Functions
+(define-public (initialize-institution-reputation (institution principal))
+    (begin
+        (asserts! (is-registered institution) err-not-registered)
+        (asserts! (is-none (map-get? institutional-reputation institution)) err-already-registered)
+        (map-set institutional-reputation institution
+            {
+                overall-score: u500,
+                transfer-success-rate: u0,
+                course-quality-score: u0,
+                response-time-score: u500,
+                total-transfers: u0,
+                successful-transfers: u0,
+                last-updated: stacks-block-height,
+                reputation-tier: "basic"
+            }
+        )
+        (map-set reputation-metrics institution
+            {
+                pending-transfers: u0,
+                rejected-transfers: u0,
+                average-response-time: u0,
+                total-course-ratings: u0,
+                total-rating-points: u0,
+                verification-requests: u0,
+                successful-verifications: u0
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-public (update-transfer-outcome 
+    (institution principal)
+    (successful bool)
+    (response-time uint))
+    (let
+        ((current-reputation (unwrap! (map-get? institutional-reputation institution) err-not-registered))
+         (current-metrics (unwrap! (map-get? reputation-metrics institution) err-not-registered))
+         (new-total-transfers (+ (get total-transfers current-reputation) u1))
+         (new-successful-transfers (if successful 
+             (+ (get successful-transfers current-reputation) u1)
+             (get successful-transfers current-reputation)))
+         (new-avg-response-time (if (> (get total-transfers current-reputation) u0)
+             (/ (+ (* (get average-response-time current-metrics) (get total-transfers current-reputation)) response-time) 
+                new-total-transfers)
+             response-time)))
+        
+        (map-set institutional-reputation institution
+            (merge current-reputation
+                {
+                    total-transfers: new-total-transfers,
+                    successful-transfers: new-successful-transfers,
+                    last-updated: stacks-block-height
+                }
+            )
+        )
+        (map-set reputation-metrics institution
+            (merge current-metrics
+                {
+                    average-response-time: new-avg-response-time,
+                    pending-transfers: (if successful 
+                        (if (> (get pending-transfers current-metrics) u0)
+                            (- (get pending-transfers current-metrics) u1)
+                            u0)
+                        (get pending-transfers current-metrics)),
+                    rejected-transfers: (if successful
+                        (get rejected-transfers current-metrics)
+                        (+ (get rejected-transfers current-metrics) u1))
+                }
+            )
+        )
+        (ok true)
+    )
+)
+
+(define-public (update-course-rating-metrics
+    (institution principal)
+    (rating uint))
+    (let
+        ((current-metrics (unwrap! (map-get? reputation-metrics institution) err-not-registered)))
+        (asserts! (and (>= rating u1) (<= rating u5)) err-invalid-rating)
+        (map-set reputation-metrics institution
+            (merge current-metrics
+                {
+                    total-course-ratings: (+ (get total-course-ratings current-metrics) u1),
+                    total-rating-points: (+ (get total-rating-points current-metrics) rating)
+                }
+            )
+        )
+        (ok true)
+    )
+)
