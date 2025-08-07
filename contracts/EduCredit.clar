@@ -155,6 +155,254 @@
     )
 )
 
+;; Smart Credit Portfolio & Degree Progress Tracking System
+
+;; Additional error constants for portfolio system
+(define-constant err-degree-not-found (err u115))
+(define-constant err-invalid-credit-category (err u116))
+(define-constant err-degree-already-exists (err u117))
+(define-constant err-portfolio-not-found (err u118))
+(define-constant err-insufficient-credits (err u119))
+
+;; Degree requirement templates
+(define-map degree-templates
+    {institution: principal, degree-id: (string-ascii 30)}
+    {
+        degree-name: (string-ascii 50),
+        total-credits-required: uint,
+        core-credits-required: uint,
+        elective-credits-required: uint,
+        major-credits-required: uint,
+        minimum-gpa: uint, ;; scaled by 100 (e.g., 250 = 2.50 GPA)
+        active: bool
+    }
+)
+
+;; Student credit portfolios tracking all credits across institutions
+(define-map student-portfolios
+    (string-ascii 20) ;; student-id
+    {
+        total-credits: uint,
+        core-credits: uint,
+        elective-credits: uint,
+        major-credits: uint,
+        institutions-attended: (list 20 principal),
+        current-gpa: uint, ;; scaled by 100
+        last-updated: uint
+    }
+)
+
+;; Individual credit records within portfolios
+(define-map portfolio-credits
+    {student-id: (string-ascii 20), credit-id: uint}
+    {
+        institution: principal,
+        course-id: (string-ascii 20),
+        credits: uint,
+        grade: (string-ascii 2),
+        grade-points: uint, ;; scaled by 100
+        credit-category: (string-ascii 10), ;; "core", "major", "elective"
+        completion-date: uint,
+        verified: bool
+    }
+)
+
+;; Degree progress tracking for students
+(define-map degree-progress
+    {student-id: (string-ascii 20), institution: principal, degree-id: (string-ascii 30)}
+    {
+        progress-percentage: uint,
+        core-completion: uint,
+        major-completion: uint,
+        elective-completion: uint,
+        estimated-completion-date: uint,
+        requirements-met: bool,
+        last-calculated: uint
+    }
+)
+
+(define-data-var portfolio-credit-nonce uint u0)
+
+;; Private helper functions
+(define-private (calculate-grade-points (grade (string-ascii 2)) (credits uint))
+    (let ((grade-value (if (is-eq grade "A+") u425
+                      (if (is-eq grade "A") u400
+                      (if (is-eq grade "A-") u375
+                      (if (is-eq grade "B+") u350
+                      (if (is-eq grade "B") u300
+                      (if (is-eq grade "B-") u275
+                      (if (is-eq grade "C+") u250
+                      (if (is-eq grade "C") u200
+                      (if (is-eq grade "D") u100
+                      u0)))))))))))
+        (* grade-value credits)
+    )
+)
+
+(define-private (is-valid-credit-category (category (string-ascii 10)))
+    (or (is-eq category "core")
+        (or (is-eq category "major") (is-eq category "elective")))
+)
+
+(define-private (min-uint (a uint) (b uint))
+    (if (< a b) a b)
+)
+
+;; Public functions for degree template management
+(define-public (create-degree-template
+    (degree-id (string-ascii 30))
+    (degree-name (string-ascii 50))
+    (total-credits uint)
+    (core-credits uint)
+    (major-credits uint)
+    (elective-credits uint)
+    (min-gpa uint))
+    (begin
+        ;; Only registered institutions can create degree templates
+        (asserts! (is-registered tx-sender) err-not-registered)
+        (asserts! (is-none (map-get? degree-templates {institution: tx-sender, degree-id: degree-id})) err-degree-already-exists)
+        (asserts! (is-eq total-credits (+ core-credits (+ major-credits elective-credits))) err-invalid-credits)
+        (asserts! (<= min-gpa u400) err-invalid-rating) ;; Max GPA 4.00
+        
+        (map-set degree-templates {institution: tx-sender, degree-id: degree-id}
+            {
+                degree-name: degree-name,
+                total-credits-required: total-credits,
+                core-credits-required: core-credits,
+                elective-credits-required: elective-credits,
+                major-credits-required: major-credits,
+                minimum-gpa: min-gpa,
+                active: true
+            }
+        )
+        (ok true)
+    )
+)
+
+;; Function to record a credit in student's portfolio
+(define-public (record-portfolio-credit
+    (student-id (string-ascii 20))
+    (course-id (string-ascii 20))
+    (credits uint)
+    (grade (string-ascii 2))
+    (credit-category (string-ascii 10)))
+    (let
+        ((credit-id (var-get portfolio-credit-nonce))
+         (grade-points (calculate-grade-points grade credits))
+         (current-portfolio (default-to 
+            {
+                total-credits: u0,
+                core-credits: u0,
+                elective-credits: u0,
+                major-credits: u0,
+                institutions-attended: (list),
+                current-gpa: u0,
+                last-updated: u0
+            }
+            (map-get? student-portfolios student-id))))
+        
+        ;; Validate inputs
+        (asserts! (is-registered tx-sender) err-not-registered)
+        (asserts! (> credits u0) err-invalid-credits)
+        (asserts! (is-valid-credit-category credit-category) err-invalid-credit-category)
+        
+        ;; Record the individual credit
+        (map-set portfolio-credits {student-id: student-id, credit-id: credit-id}
+            {
+                institution: tx-sender,
+                course-id: course-id,
+                credits: credits,
+                grade: grade,
+                grade-points: grade-points,
+                credit-category: credit-category,
+                completion-date: stacks-block-height,
+                verified: true
+            }
+        )
+        
+        ;; Update student's portfolio summary
+        (map-set student-portfolios student-id
+            (merge current-portfolio
+                {
+                    total-credits: (+ (get total-credits current-portfolio) credits),
+                    core-credits: (if (is-eq credit-category "core")
+                        (+ (get core-credits current-portfolio) credits)
+                        (get core-credits current-portfolio)),
+                    major-credits: (if (is-eq credit-category "major")
+                        (+ (get major-credits current-portfolio) credits)
+                        (get major-credits current-portfolio)),
+                    elective-credits: (if (is-eq credit-category "elective")
+                        (+ (get elective-credits current-portfolio) credits)
+                        (get elective-credits current-portfolio)),
+                    last-updated: stacks-block-height
+                }
+            )
+        )
+        
+        (var-set portfolio-credit-nonce (+ credit-id u1))
+        (ok credit-id)
+    )
+)
+
+;; Function to calculate degree progress for a student
+(define-public (calculate-degree-progress
+    (student-id (string-ascii 20))
+    (institution principal)
+    (degree-id (string-ascii 30)))
+    (let
+        ((degree-template (unwrap! (map-get? degree-templates {institution: institution, degree-id: degree-id}) err-degree-not-found))
+         (portfolio (unwrap! (map-get? student-portfolios student-id) err-portfolio-not-found))
+         (core-progress (/ (* (get core-credits portfolio) u100) (get core-credits-required degree-template)))
+         (major-progress (/ (* (get major-credits portfolio) u100) (get major-credits-required degree-template)))
+         (elective-progress (/ (* (get elective-credits portfolio) u100) (get elective-credits-required degree-template)))
+         (total-progress (/ (* (get total-credits portfolio) u100) (get total-credits-required degree-template)))
+         (requirements-met (and
+            (>= (get core-credits portfolio) (get core-credits-required degree-template))
+            (and
+                (>= (get major-credits portfolio) (get major-credits-required degree-template))
+                (>= (get elective-credits portfolio) (get elective-credits-required degree-template))))))
+        
+        ;; Ensure the degree template is active
+        (asserts! (get active degree-template) err-unauthorized)
+        
+        (map-set degree-progress {student-id: student-id, institution: institution, degree-id: degree-id}
+            {
+                progress-percentage: (min-uint total-progress u100),
+                core-completion: (min-uint core-progress u100),
+                major-completion: (min-uint major-progress u100),
+                elective-completion: (min-uint elective-progress u100),
+                estimated-completion-date: (if requirements-met
+                    stacks-block-height
+                    (+ stacks-block-height u26280)), ;; ~6 months estimate
+                requirements-met: requirements-met,
+                last-calculated: stacks-block-height
+            }
+        )
+        (ok true)
+    )
+)
+
+;; Function to validate degree completion eligibility
+(define-public (validate-degree-completion
+    (student-id (string-ascii 20))
+    (institution principal)
+    (degree-id (string-ascii 30)))
+    (let
+        ((degree-template (unwrap! (map-get? degree-templates {institution: institution, degree-id: degree-id}) err-degree-not-found))
+         (portfolio (unwrap! (map-get? student-portfolios student-id) err-portfolio-not-found))
+         (progress (unwrap! (map-get? degree-progress {student-id: student-id, institution: institution, degree-id: degree-id}) err-degree-not-found)))
+        
+        ;; Check all degree requirements
+        (asserts! (>= (get total-credits portfolio) (get total-credits-required degree-template)) err-insufficient-credits)
+        (asserts! (>= (get core-credits portfolio) (get core-credits-required degree-template)) err-insufficient-credits)
+        (asserts! (>= (get major-credits portfolio) (get major-credits-required degree-template)) err-insufficient-credits)
+        (asserts! (>= (get elective-credits portfolio) (get elective-credits-required degree-template)) err-insufficient-credits)
+        (asserts! (>= (get current-gpa portfolio) (get minimum-gpa degree-template)) err-invalid-rating)
+        
+        (ok true)
+    )
+)
+
 ;; Read-only Functions
 (define-read-only (get-institution-info (institution principal))
     (map-get? registered-institutions institution)
@@ -680,6 +928,26 @@
     )
 )
 
+;; Read-only functions for portfolio system
+(define-read-only (get-degree-template (institution principal) (degree-id (string-ascii 30)))
+    (map-get? degree-templates {institution: institution, degree-id: degree-id})
+)
+
+(define-read-only (get-student-portfolio (student-id (string-ascii 20)))
+    (map-get? student-portfolios student-id)
+)
+
+(define-read-only (get-portfolio-credit (student-id (string-ascii 20)) (credit-id uint))
+    (map-get? portfolio-credits {student-id: student-id, credit-id: credit-id})
+)
+
+(define-read-only (get-degree-progress 
+    (student-id (string-ascii 20))
+    (institution principal)
+    (degree-id (string-ascii 30)))
+    (map-get? degree-progress {student-id: student-id, institution: institution, degree-id: degree-id})
+)
+
 ;; Institutional Reputation System Constants
 (define-constant err-invalid-reputation-score (err u112))
 (define-constant err-reputation-calculation-error (err u113))
@@ -924,3 +1192,7 @@
         (ok true)
     )
 )
+
+
+
+
