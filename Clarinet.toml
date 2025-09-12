@@ -9,6 +9,10 @@ requirements = []
 path = 'contracts/EduCredit.clar'
 clarity_version = 3
 epoch = 3.1
+[contracts.ScholarshipFund]
+path = 'contracts/ScholarshipFund.clar'
+clarity_version = 3
+epoch = 3.1
 [repl.analysis]
 passes = ['check_checker']
 
